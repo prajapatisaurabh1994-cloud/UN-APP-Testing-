@@ -149,9 +149,11 @@ async function loadAllData() {
   } catch(e) { STATE.activeOverrides = {}; }
 
   // Apply overrides on top of sheet data
+  // ── FIX: use String(student.id) so keys always match regardless of type ──
   STATE.students = s.map(student => {
-    if (student.id in STATE.activeOverrides) {
-      return { ...student, active: STATE.activeOverrides[student.id] };
+    const key = String(student.id);
+    if (key in STATE.activeOverrides) {
+      return { ...student, active: STATE.activeOverrides[key] };
     }
     return student;
   });
@@ -657,20 +659,19 @@ async function addStudent() {
 }
 
 async function toggleStudent(id) {
-  const s = STATE.students.find(s=>s.id===id);
+  // ── FIX: compare as strings to avoid type mismatch (sheet IDs may be coerced) ──
+  const s = STATE.students.find(s => String(s.id) === String(id));
   if (!s) return;
 
   // Flip in memory
   const nowActive = !isActive(s);
   s.active = nowActive ? 'true' : 'false';
 
-  // ── Save override to localStorage so it survives refresh ──
-  // This is the KEY fix — sheet writes are async and unreliable (no-cors),
-  // so we persist the admin's intent locally immediately
-  STATE.activeOverrides[id] = s.active;
+  // ── Persist override to localStorage immediately ──
+  // Sheet writes use no-cors so we never get confirmation; local override
+  // ensures the UI stays correct even after page refresh.
+  STATE.activeOverrides[String(id)] = s.active;
   try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
-
-  window._ss = STATE.students;
 
   // ── Kill the student's session if they are currently logged in ──
   try {
@@ -688,15 +689,18 @@ async function toggleStudent(id) {
     }
   } catch(e) {}
 
-  // Refresh admin table
+  toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
+
+  // ── FIX: fully re-render the students view so both table and mobile cards
+  // are always in sync with STATE.students, regardless of search filter state ──
+  window._ss = STATE.students;
   const tbody = document.getElementById('sTbody');
   const cards = document.getElementById('sCards');
   if (tbody) tbody.innerHTML = studentRows(STATE.students);
   if (cards) cards.innerHTML = studentMobileCards(STATE.students);
-  toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
 
-  // Also send to sheet (best-effort, no-cors so may be slow)
-  await writeToSheet('toggleStudent', { id, active: s.active });
+  // Send to sheet (best-effort; no-cors so response is opaque)
+  await writeToSheet('toggleStudent', { id: String(id), active: s.active });
 }
 
 async function trashStudent(id) {
