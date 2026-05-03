@@ -11,7 +11,7 @@ const CONFIG = {
     batches  : 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQublwdN0HHaxdwKk0VrQ_UFPP9r9q1MRuNLo-KFMnQ5WSWJskjO4i9J6iWk8UPVasuPZ9g1zaAMlWc/pub?gid=0&single=true&output=csv',
     lectures : 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQublwdN0HHaxdwKk0VrQ_UFPP9r9q1MRuNLo-KFMnQ5WSWJskjO4i9J6iWk8UPVasuPZ9g1zaAMlWc/pub?gid=1542279364&single=true&output=csv',
   },
-  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbz6x1Ly1m2-FCSdMDlfhdtArVEPcmX5gpxC3poSJrhp3MtkoJOYseQ4ukTnsBVpCmdo/exec',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwEJ1FbumZHTUak2dIsJmzBKawGjc8-rsqP-yyT-tpVmPilByhAj9aDmSaGwzndbDbl/exec',
   ADMIN: {
     email    : 'admin@unacademygwalior.com',
     password : 'Admin@123',
@@ -161,12 +161,12 @@ async function writeToSheet(action, data) {
   if (usingDemo()) return { success: true };
   try {
     const payload = JSON.stringify({ action, ...data });
-    const blob    = new Blob([payload], { type: 'text/plain' });
-    // sendBeacon is the only browser API that correctly POSTs to Apps Script:
-    // — follows the 302 redirect while keeping the body intact
-    // — not blocked by CORS or GitHub Pages CSP
-    // — works with the existing doPost(e) handler unchanged
-    navigator.sendBeacon(CONFIG.APPS_SCRIPT_URL, blob);
+    await fetch(CONFIG.APPS_SCRIPT_URL, {
+      method : 'POST',
+      mode   : 'no-cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body   : payload,
+    });
     return { success: true };
   } catch (e) {
     console.error('writeToSheet error:', e);
@@ -284,6 +284,19 @@ async function checkStoredLogin() {
     try {
       STATE.user = JSON.parse(stored);
       await loadAllData();
+
+      // ── If student, verify they are still active in the sheet ──
+      if (STATE.user.role === 'student') {
+        const student = STATE.students.find(s => s.email.toLowerCase() === STATE.user.email.toLowerCase());
+        if (!student || !isActive(student)) {
+          // Deactivated — kill session and show login with message
+          localStorage.removeItem('userSession');
+          STATE.user = null;
+          toast('Your account has been deactivated. Contact admin.', 'e');
+          return;
+        }
+      }
+
       launchApp();
     } catch(e) {
       localStorage.removeItem('userSession');
