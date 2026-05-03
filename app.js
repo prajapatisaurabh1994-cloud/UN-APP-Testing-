@@ -29,6 +29,9 @@ let STATE = {
   lectures : [],
   section  : '',
   trash    : { batches:[], students:[], lectures:[] },
+  // activeOverrides: { [studentId]: 'true'|'false' }
+  // Admin changes here survive refresh even if sheet write is slow
+  activeOverrides: {},
 };
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -138,23 +141,32 @@ async function loadAllData() {
   ]);
   STATE.batches  = b;
   STATE.lectures = l;
-  STATE.students = s;
+
+  // Load saved active overrides (admin changes that may not have synced to sheet yet)
+  try {
+    const saved = localStorage.getItem('activeOverrides');
+    if (saved) STATE.activeOverrides = JSON.parse(saved);
+  } catch(e) { STATE.activeOverrides = {}; }
+
+  // Apply overrides on top of sheet data
+  STATE.students = s.map(student => {
+    if (student.id in STATE.activeOverrides) {
+      return { ...student, active: STATE.activeOverrides[student.id] };
+    }
+    return student;
+  });
 }
 
 async function writeToSheet(action, data) {
   if (usingDemo()) return { success: true };
   try {
-    // Build URL with query params — this is the ONLY method that reliably
-    // reaches Apps Script from a browser hosted on GitHub Pages.
-    // fetch() POST loses its body on the 302 redirect Apps Script issues.
-    // The doGet() handler in the script reads e.parameter for all fields.
-    const params = new URLSearchParams({ action, ...data });
-    // Use no-cors so GitHub Pages CSP doesn't block it.
-    // We can't read the response, but the GET reaches GAS every time.
-    await fetch(CONFIG.APPS_SCRIPT_URL + '?' + params.toString(), {
-      method: 'GET',
-      mode:   'no-cors',
-    });
+    const payload = JSON.stringify({ action, ...data });
+    const blob    = new Blob([payload], { type: 'text/plain' });
+    // sendBeacon is the only browser API that correctly POSTs to Apps Script:
+    // — follows the 302 redirect while keeping the body intact
+    // — not blocked by CORS or GitHub Pages CSP
+    // — works with the existing doPost(e) handler unchanged
+    navigator.sendBeacon(CONFIG.APPS_SCRIPT_URL, blob);
     return { success: true };
   } catch (e) {
     console.error('writeToSheet error:', e);
@@ -645,32 +657,46 @@ async function addStudent() {
 }
 
 async function toggleStudent(id) {
-  const s = STATE.students.find(s => String(s.id) === String(id));
+  const s = STATE.students.find(s=>s.id===id);
   if (!s) return;
 
+  // Flip in memory
   const nowActive = !isActive(s);
   s.active = nowActive ? 'true' : 'false';
 
-  // Update UI immediately
-  window._ss = STATE.students;
-  const tbody = document.getElementById('sTbody');
-  const cards = document.getElementById('sCards');
-  if (tbody) tbody.innerHTML = studentRows(STATE.students);
-  if (cards) cards.innerHTML = studentMobileCards(STATE.students);
+  // ── Save override to localStorage so it survives refresh ──
+  // This is the KEY fix — sheet writes are async and unreliable (no-cors),
+  // so we persist the admin's intent locally immediately
+  STATE.activeOverrides[id] = s.active;
+  try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
 
-  // Kill student session if being deactivated
+  window._ss = STATE.students;
+
+  // ── Kill the student's session if they are currently logged in ──
   try {
     const session = localStorage.getItem('userSession');
     if (session) {
       const u = JSON.parse(session);
-      if (u.role === 'student' && u.email.toLowerCase() === s.email.toLowerCase() && !nowActive) {
-        localStorage.removeItem('userSession');
+      if (u.role === 'student' && u.email && u.email.toLowerCase() === s.email.toLowerCase()) {
+        if (!nowActive) {
+          localStorage.removeItem('userSession');
+        } else {
+          u.batchId = s.batchId;
+          localStorage.setItem('userSession', JSON.stringify(u));
+        }
       }
     }
   } catch(e) {}
 
-  await writeToSheet('toggleStudent', { id: String(id), active: s.active });
+  // Refresh admin table
+  const tbody = document.getElementById('sTbody');
+  const cards = document.getElementById('sCards');
+  if (tbody) tbody.innerHTML = studentRows(STATE.students);
+  if (cards) cards.innerHTML = studentMobileCards(STATE.students);
   toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
+
+  // Also send to sheet (best-effort, no-cors so may be slow)
+  await writeToSheet('toggleStudent', { id, active: s.active });
 }
 
 async function trashStudent(id) {
@@ -678,6 +704,9 @@ async function trashStudent(id) {
   if (!confirm(`Move "${s.name}" to Recycle Bin?`)) return;
   STATE.trash.students.unshift({ ...s, deletedAt: new Date().toLocaleString() });
   STATE.students = STATE.students.filter(s=>s.id!==id);
+  // Clear any stored override for this student
+  delete STATE.activeOverrides[id];
+  try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
   window._ss = STATE.students;
   const tbody = document.getElementById('sTbody');
   const cards = document.getElementById('sCards');
@@ -965,6 +994,9 @@ function restoreStudent(id) {
   const s = STATE.trash.students.find(s=>s.id===id);
   STATE.students.push(s);
   STATE.trash.students = STATE.trash.students.filter(s=>s.id!==id);
+  // Clear any stored override so sheet value takes precedence after restore
+  delete STATE.activeOverrides[s.id];
+  try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
   toast(`${s.name} restored ✅`,'s');
   writeToSheet('addStudent', s);
   recycleBin();
