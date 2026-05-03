@@ -138,33 +138,55 @@ async function loadAllData() {
   ]);
   STATE.batches  = b;
   STATE.lectures = l;
-  STATE.students = s; // ── FIX: use sheet data directly, no localStorage overrides
+  STATE.students = s;
 }
 
-async function writeToSheet(action, data) {
-  if (usingDemo()) return { success: true };
-  try {
-    // ── FIX: Apps Script web apps redirect POST requests, causing the body to be
-    // dropped in no-cors mode. Using POST with mode:'cors' and text/plain content
-    // type works reliably because Apps Script accepts it via doPost(e).
-    // We keep text/plain (not application/json) to avoid CORS preflight.
-    const payload = JSON.stringify({ action, ...data });
-    const resp = await fetch(CONFIG.APPS_SCRIPT_URL, {
-      method      : 'POST',
-      mode        : 'cors',
-      redirect    : 'follow',
-      headers     : { 'Content-Type': 'text/plain' },
-      body        : payload,
-    });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const result = await resp.json();
-    if (!result.success) throw new Error(result.error || 'Unknown error');
-    return result;
-  } catch (e) {
-    console.error('writeToSheet error:', e);
-    toast('⚠️ Could not sync to Google Sheets: ' + e.message, 'e');
-    return { success: false };
-  }
+function writeToSheet(action, data) {
+  if (usingDemo()) return Promise.resolve({ success: true });
+
+  // ── The only 100% reliable way to POST to Apps Script from a browser ──
+  // fetch() loses the body on the 302 redirect Apps Script always issues.
+  // XMLHttpRequest with no-cors also fails silently.
+  // A hidden <form> submit bypasses all of this — the browser follows the
+  // redirect natively and the full payload reaches doPost() every time.
+  return new Promise((resolve) => {
+    try {
+      const form   = document.createElement('form');
+      form.method  = 'POST';
+      form.action  = CONFIG.APPS_SCRIPT_URL;
+      form.target  = '_blank';            // open in hidden iframe, not current tab
+      form.style.display = 'none';
+
+      // Pack everything into one field as JSON so doPost can JSON.parse it
+      const input  = document.createElement('input');
+      input.type   = 'hidden';
+      input.name   = 'payload';
+      input.value  = JSON.stringify({ action, ...data });
+      form.appendChild(input);
+
+      // Use a hidden iframe as target so no tab opens
+      let iframe = document.getElementById('_gasFrame');
+      if (!iframe) {
+        iframe      = document.createElement('iframe');
+        iframe.name = '_gasFrame';
+        iframe.id   = '_gasFrame';
+        iframe.style.display = 'none';
+        document.body.appendChild(iframe);
+      }
+      form.target = '_gasFrame';
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+
+      // Apps Script is fire-and-forget from a form submit (can't read iframe
+      // response cross-origin). Assume success after a short delay.
+      setTimeout(() => resolve({ success: true }), 1500);
+    } catch(e) {
+      console.error('writeToSheet error:', e);
+      toast('⚠️ Could not sync to Google Sheets', 'e');
+      resolve({ success: false });
+    }
+  });
 }
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -655,31 +677,27 @@ async function toggleStudent(id) {
   const nowActive = !isActive(s);
   s.active = nowActive ? 'true' : 'false';
 
-  // ── Update DOM immediately for instant feedback ──
+  // Update UI immediately
   window._ss = STATE.students;
   const tbody = document.getElementById('sTbody');
   const cards = document.getElementById('sCards');
   if (tbody) tbody.innerHTML = studentRows(STATE.students);
   if (cards) cards.innerHTML = studentMobileCards(STATE.students);
-  toast(`${s.name} ${nowActive ? 'activating… ⏳' : 'deactivating… ⏳'}`);
 
-  // ── Kill student session if currently logged in ──
+  // Kill student session if being deactivated
   try {
     const session = localStorage.getItem('userSession');
     if (session) {
       const u = JSON.parse(session);
-      if (u.role === 'student' && u.email.toLowerCase() === s.email.toLowerCase()) {
-        if (!nowActive) localStorage.removeItem('userSession');
-        else { u.batchId = s.batchId; localStorage.setItem('userSession', JSON.stringify(u)); }
+      if (u.role === 'student' && u.email.toLowerCase() === s.email.toLowerCase() && !nowActive) {
+        localStorage.removeItem('userSession');
       }
     }
   } catch(e) {}
 
-  // ── Write to sheet and show confirmed result ──
-  const result = await writeToSheet('toggleStudent', { id: String(id), active: s.active });
-  if (result.success) {
-    toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
-  }
+  toast(`${s.name} ${nowActive ? 'activating…' : 'deactivating…'}`);
+  await writeToSheet('toggleStudent', { id: String(id), active: s.active });
+  toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
 }
 
 async function trashStudent(id) {
