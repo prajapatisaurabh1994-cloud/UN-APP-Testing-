@@ -11,7 +11,7 @@ const CONFIG = {
     batches  : 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQublwdN0HHaxdwKk0VrQ_UFPP9r9q1MRuNLo-KFMnQ5WSWJskjO4i9J6iWk8UPVasuPZ9g1zaAMlWc/pub?gid=0&single=true&output=csv',
     lectures : 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQublwdN0HHaxdwKk0VrQ_UFPP9r9q1MRuNLo-KFMnQ5WSWJskjO4i9J6iWk8UPVasuPZ9g1zaAMlWc/pub?gid=1542279364&single=true&output=csv',
   },
-  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbxzeCqj-sFk9uqHksFwk0cjEbsDI8jEQutom0fnhd1hwBLXwoRCPGs6XOjCFwJur-6k/exec',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwEJ1FbumZHTUak2dIsJmzBKawGjc8-rsqP-yyT-tpVmPilByhAj9aDmSaGwzndbDbl/exec',
   ADMIN: {
     email    : 'admin@unacademygwalior.com',
     password : 'Admin@123',
@@ -222,6 +222,8 @@ async function studentLogin() {
 
   try {
     await loadAllData();
+
+    // First find student by email in CSV (for name/batchId)
     const student = STATE.students.find(s => s.email.toLowerCase() === emailVal);
 
     if (!student) {
@@ -232,7 +234,12 @@ async function studentLogin() {
       toast('Incorrect password', 'e');
       btn.disabled = false; btn.textContent = 'Login →'; return;
     }
-    if (!isActive(student)) {
+
+    // ── Check active status via Apps Script (live sheet, not cached CSV) ──
+    // The published CSV can be stale for minutes after admin deactivates a student.
+    // Apps Script reads the sheet directly so it's always up to date.
+    const liveCheck = await fetchLiveStudentStatus(student.id, password);
+    if (!liveCheck.active) {
       toast('Your account is inactive. Contact admin.', 'e');
       btn.disabled = false; btn.textContent = 'Login →'; return;
     }
@@ -244,6 +251,32 @@ async function studentLogin() {
   } catch(err) {
     toast('Login failed. Try again.', 'e');
     btn.disabled = false; btn.textContent = 'Login →';
+  }
+}
+
+// Calls Apps Script loginStudent which reads LIVE sheet data (not cached CSV)
+async function fetchLiveStudentStatus(id, password) {
+  if (usingDemo()) return { active: true };
+  try {
+    const blob = new Blob(
+      [JSON.stringify({ action: 'loginStudent', id, password })],
+      { type: 'text/plain' }
+    );
+    // sendBeacon is fire-and-forget so we can't use it here.
+    // For login we need the response — use fetch with no-cors fallback.
+    // Since we need to READ the response, we try cors first.
+    const resp = await fetch(CONFIG.APPS_SCRIPT_URL, {
+      method: 'POST',
+      mode: 'cors',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'loginStudent', id, password }),
+    });
+    const data = await resp.json();
+    return { active: data.success === true };
+  } catch(e) {
+    // If cors fails (e.g. network), fall back to CSV active value
+    const student = STATE.students.find(s => String(s.id) === String(id));
+    return { active: student ? isActive(student) : false };
   }
 }
 
@@ -284,19 +317,6 @@ async function checkStoredLogin() {
     try {
       STATE.user = JSON.parse(stored);
       await loadAllData();
-
-      // ── If student, verify they are still active in the sheet ──
-      if (STATE.user.role === 'student') {
-        const student = STATE.students.find(s => s.email.toLowerCase() === STATE.user.email.toLowerCase());
-        if (!student || !isActive(student)) {
-          // Deactivated — kill session and show login with message
-          localStorage.removeItem('userSession');
-          STATE.user = null;
-          toast('Your account has been deactivated. Contact admin.', 'e');
-          return;
-        }
-      }
-
       launchApp();
     } catch(e) {
       localStorage.removeItem('userSession');
