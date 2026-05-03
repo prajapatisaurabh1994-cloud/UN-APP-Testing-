@@ -141,52 +141,26 @@ async function loadAllData() {
   STATE.students = s;
 }
 
-function writeToSheet(action, data) {
-  if (usingDemo()) return Promise.resolve({ success: true });
-
-  // ── The only 100% reliable way to POST to Apps Script from a browser ──
-  // fetch() loses the body on the 302 redirect Apps Script always issues.
-  // XMLHttpRequest with no-cors also fails silently.
-  // A hidden <form> submit bypasses all of this — the browser follows the
-  // redirect natively and the full payload reaches doPost() every time.
-  return new Promise((resolve) => {
-    try {
-      const form   = document.createElement('form');
-      form.method  = 'POST';
-      form.action  = CONFIG.APPS_SCRIPT_URL;
-      form.target  = '_blank';            // open in hidden iframe, not current tab
-      form.style.display = 'none';
-
-      // Pack everything into one field as JSON so doPost can JSON.parse it
-      const input  = document.createElement('input');
-      input.type   = 'hidden';
-      input.name   = 'payload';
-      input.value  = JSON.stringify({ action, ...data });
-      form.appendChild(input);
-
-      // Use a hidden iframe as target so no tab opens
-      let iframe = document.getElementById('_gasFrame');
-      if (!iframe) {
-        iframe      = document.createElement('iframe');
-        iframe.name = '_gasFrame';
-        iframe.id   = '_gasFrame';
-        iframe.style.display = 'none';
-        document.body.appendChild(iframe);
-      }
-      form.target = '_gasFrame';
-      document.body.appendChild(form);
-      form.submit();
-      document.body.removeChild(form);
-
-      // Apps Script is fire-and-forget from a form submit (can't read iframe
-      // response cross-origin). Assume success after a short delay.
-      setTimeout(() => resolve({ success: true }), 1500);
-    } catch(e) {
-      console.error('writeToSheet error:', e);
-      toast('⚠️ Could not sync to Google Sheets', 'e');
-      resolve({ success: false });
-    }
-  });
+async function writeToSheet(action, data) {
+  if (usingDemo()) return { success: true };
+  try {
+    // Build URL with query params — this is the ONLY method that reliably
+    // reaches Apps Script from a browser hosted on GitHub Pages.
+    // fetch() POST loses its body on the 302 redirect Apps Script issues.
+    // The doGet() handler in the script reads e.parameter for all fields.
+    const params = new URLSearchParams({ action, ...data });
+    // Use no-cors so GitHub Pages CSP doesn't block it.
+    // We can't read the response, but the GET reaches GAS every time.
+    await fetch(CONFIG.APPS_SCRIPT_URL + '?' + params.toString(), {
+      method: 'GET',
+      mode:   'no-cors',
+    });
+    return { success: true };
+  } catch (e) {
+    console.error('writeToSheet error:', e);
+    toast('⚠️ Could not sync to Google Sheets', 'e');
+    return { success: false };
+  }
 }
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -695,7 +669,6 @@ async function toggleStudent(id) {
     }
   } catch(e) {}
 
-  toast(`${s.name} ${nowActive ? 'activating…' : 'deactivating…'}`);
   await writeToSheet('toggleStudent', { id: String(id), active: s.active });
   toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
 }
