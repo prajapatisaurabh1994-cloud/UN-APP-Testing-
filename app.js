@@ -11,7 +11,7 @@ const CONFIG = {
     batches  : 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQublwdN0HHaxdwKk0VrQ_UFPP9r9q1MRuNLo-KFMnQ5WSWJskjO4i9J6iWk8UPVasuPZ9g1zaAMlWc/pub?gid=0&single=true&output=csv',
     lectures : 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQublwdN0HHaxdwKk0VrQ_UFPP9r9q1MRuNLo-KFMnQ5WSWJskjO4i9J6iWk8UPVasuPZ9g1zaAMlWc/pub?gid=1542279364&single=true&output=csv',
   },
-  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbwEJ1FbumZHTUak2dIsJmzBKawGjc8-rsqP-yyT-tpVmPilByhAj9aDmSaGwzndbDbl/exec',
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbxzeCqj-sFk9uqHksFwk0cjEbsDI8jEQutom0fnhd1hwBLXwoRCPGs6XOjCFwJur-6k/exec',
   ADMIN: {
     email    : 'admin@unacademygwalior.com',
     password : 'Admin@123',
@@ -29,9 +29,6 @@ let STATE = {
   lectures : [],
   section  : '',
   trash    : { batches:[], students:[], lectures:[] },
-  // activeOverrides: { [studentId]: 'true'|'false' }
-  // Admin changes here survive refresh even if sheet write is slow
-  activeOverrides: {},
 };
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -141,38 +138,23 @@ async function loadAllData() {
   ]);
   STATE.batches  = b;
   STATE.lectures = l;
-
-  // Load saved active overrides (admin changes that may not have synced to sheet yet)
-  try {
-    const saved = localStorage.getItem('activeOverrides');
-    if (saved) STATE.activeOverrides = JSON.parse(saved);
-  } catch(e) { STATE.activeOverrides = {}; }
-
-  // Apply overrides on top of sheet data
-  STATE.students = s.map(student => {
-    if (student.id in STATE.activeOverrides) {
-      return { ...student, active: STATE.activeOverrides[student.id] };
-    }
-    return student;
-  });
+  STATE.students = s;
 }
 
-async function writeToSheet(action, data) {
-  if (usingDemo()) return { success: true };
-  try {
-    const payload = JSON.stringify({ action, ...data });
-    await fetch(CONFIG.APPS_SCRIPT_URL, {
-      method : 'POST',
-      mode   : 'no-cors',
-      headers: { 'Content-Type': 'text/plain' },
-      body   : payload,
-    });
-    return { success: true };
-  } catch (e) {
-    console.error('writeToSheet error:', e);
-    toast('⚠️ Could not sync to Google Sheets', 'e');
-    return { success: false };
-  }
+function writeToSheet(action, data) {
+  if (usingDemo()) return Promise.resolve({ success: true });
+  return new Promise((resolve) => {
+    try {
+      const payload = JSON.stringify({ action, ...data });
+      const blob    = new Blob([payload], { type: 'text/plain' });
+      navigator.sendBeacon(CONFIG.APPS_SCRIPT_URL, blob);
+      resolve({ success: true });
+    } catch(e) {
+      console.error('writeToSheet error:', e);
+      toast('⚠️ Could not sync to Google Sheets', 'e');
+      resolve({ success: false });
+    }
+  });
 }
 
 // ╔══════════════════════════════════════════════════════════╗
@@ -317,6 +299,15 @@ async function checkStoredLogin() {
     try {
       STATE.user = JSON.parse(stored);
       await loadAllData();
+      if (STATE.user.role === 'student') {
+        const student = STATE.students.find(s => s.email.toLowerCase() === STATE.user.email.toLowerCase());
+        if (!student || !isActive(student)) {
+          localStorage.removeItem('userSession');
+          STATE.user = null;
+          toast('Your account has been deactivated. Contact admin.', 'e');
+          return;
+        }
+      }
       launchApp();
     } catch(e) {
       localStorage.removeItem('userSession');
@@ -690,46 +681,25 @@ async function addStudent() {
 }
 
 async function toggleStudent(id) {
-  const s = STATE.students.find(s=>s.id===id);
+  const s = STATE.students.find(s => String(s.id) === String(id));
   if (!s) return;
-
-  // Flip in memory
   const nowActive = !isActive(s);
   s.active = nowActive ? 'true' : 'false';
-
-  // ── Save override to localStorage so it survives refresh ──
-  // This is the KEY fix — sheet writes are async and unreliable (no-cors),
-  // so we persist the admin's intent locally immediately
-  STATE.activeOverrides[id] = s.active;
-  try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
-
   window._ss = STATE.students;
-
-  // ── Kill the student's session if they are currently logged in ──
-  try {
-    const session = localStorage.getItem('userSession');
-    if (session) {
-      const u = JSON.parse(session);
-      if (u.role === 'student' && u.email && u.email.toLowerCase() === s.email.toLowerCase()) {
-        if (!nowActive) {
-          localStorage.removeItem('userSession');
-        } else {
-          u.batchId = s.batchId;
-          localStorage.setItem('userSession', JSON.stringify(u));
-        }
-      }
-    }
-  } catch(e) {}
-
-  // Refresh admin table
   const tbody = document.getElementById('sTbody');
   const cards = document.getElementById('sCards');
   if (tbody) tbody.innerHTML = studentRows(STATE.students);
   if (cards) cards.innerHTML = studentMobileCards(STATE.students);
+  try {
+    const session = localStorage.getItem('userSession');
+    if (session) {
+      const u = JSON.parse(session);
+      if (u.role === 'student' && u.email.toLowerCase() === s.email.toLowerCase() && !nowActive)
+        localStorage.removeItem('userSession');
+    }
+  } catch(e) {}
+  await writeToSheet('toggleStudent', { id: String(id), active: s.active });
   toast(`${s.name} ${nowActive ? 'activated ✅' : 'deactivated 🔒'}`);
-
-  // Also send to sheet (best-effort, no-cors so may be slow)
-  await writeToSheet('toggleStudent', { id, active: s.active });
 }
 
 async function trashStudent(id) {
@@ -737,9 +707,6 @@ async function trashStudent(id) {
   if (!confirm(`Move "${s.name}" to Recycle Bin?`)) return;
   STATE.trash.students.unshift({ ...s, deletedAt: new Date().toLocaleString() });
   STATE.students = STATE.students.filter(s=>s.id!==id);
-  // Clear any stored override for this student
-  delete STATE.activeOverrides[id];
-  try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
   window._ss = STATE.students;
   const tbody = document.getElementById('sTbody');
   const cards = document.getElementById('sCards');
@@ -1027,9 +994,6 @@ function restoreStudent(id) {
   const s = STATE.trash.students.find(s=>s.id===id);
   STATE.students.push(s);
   STATE.trash.students = STATE.trash.students.filter(s=>s.id!==id);
-  // Clear any stored override so sheet value takes precedence after restore
-  delete STATE.activeOverrides[s.id];
-  try { localStorage.setItem('activeOverrides', JSON.stringify(STATE.activeOverrides)); } catch(e) {}
   toast(`${s.name} restored ✅`,'s');
   writeToSheet('addStudent', s);
   recycleBin();
